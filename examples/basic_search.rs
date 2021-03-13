@@ -13,15 +13,22 @@
 // ---
 // Importing tantivy...
 use tantivy::collector::TopDocs;
+use tantivy::directory::MmapDirectory;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{doc, Index, ReloadPolicy};
-use tempfile::TempDir;
+use std::fs;
+// use tempfile::TempDir;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::RowAccessor;
 
 fn main() -> tantivy::Result<()> {
     // Let's create a temporary directory for the
     // sake of this example
-    let index_path = TempDir::new()?;
+    //let index_path = TempDir::new()?;
+
+    let index_path = "/tmp/tantivy";
+    fs::create_dir_all(index_path)?;
 
     // # Defining the schema
     //
@@ -47,15 +54,10 @@ fn main() -> tantivy::Result<()> {
     // in a compressed, row-oriented key-value store.
     // This store is useful for reconstructing the
     // documents that were selected during the search phase.
-    schema_builder.add_text_field("title", TEXT | STORED);
-
-    // Our second field is body.
-    // We want full-text search for it, but we do not
-    // need to be able to be able to retrieve it
-    // for our application.
-    //
     // We can make our index lighter by omitting the `STORED` flag.
-    schema_builder.add_text_field("body", TEXT);
+    schema_builder.add_text_field("title", TEXT | STORED);
+    schema_builder.add_text_field("url", TEXT | STORED);
+    schema_builder.add_text_field("body", TEXT | STORED);
 
     let schema = schema_builder.build();
 
@@ -65,7 +67,8 @@ fn main() -> tantivy::Result<()> {
     //
     // This will actually just save a meta.json
     // with our schema in the directory.
-    let index = Index::create_in_dir(&index_path, schema.clone())?;
+    let directory = MmapDirectory::open(&index_path)?;
+    let index = Index::open_or_create(directory, schema.clone())?;
 
     // To insert a document we will need an index writer.
     // There must be only one writer at a time.
@@ -86,53 +89,29 @@ fn main() -> tantivy::Result<()> {
     // one by one in a Document object.
     let title = schema.get_field("title").unwrap();
     let body = schema.get_field("body").unwrap();
+    let url = schema.get_field("url").unwrap();
 
-    let mut old_man_doc = Document::default();
-    old_man_doc.add_text(title, "The Old Man and the Sea");
-    old_man_doc.add_text(
-        body,
-        "He was an old man who fished alone in a skiff in the Gulf Stream and \
-         he had gone eighty-four days now without taking a fish.",
-    );
+    let paths = vec![
+        "/home/alex/git/parquet/1000-wiki.parquet",
+    ];
 
-    // ... and add it to the `IndexWriter`.
-    index_writer.add_document(old_man_doc);
+    let file = fs::File::open(&std::path::Path::new(paths[0])).unwrap();
+    let reader = SerializedFileReader::new(file).unwrap();
+    let mut iter = reader.get_row_iter(None).unwrap();
+    while let Some(row) = iter.next() {
+        let r_url = row.get_string(0).unwrap();
+        let r_title = row.get_string(1).unwrap();
+        let r_body = row.get_string(2).unwrap();
+        // println!("{}", r_url);
 
-    // For convenience, tantivy also comes with a macro to
-    // reduce the boilerplate above.
-    index_writer.add_document(doc!(
-    title => "Of Mice and Men",
-    body => "A few miles south of Soledad, the Salinas River drops in close to the hillside \
-            bank and runs deep and green. The water is warm too, for it has slipped twinkling \
-            over the yellow sands in the sunlight before reaching the narrow pool. On one \
-            side of the river the golden foothill slopes curve up to the strong and rocky \
-            Gabilan Mountains, but on the valley side the water is lined with trees—willows \
-            fresh and green with every spring, carrying in their lower leaf junctures the \
-            debris of the winter’s flooding; and sycamores with mottled, white, recumbent \
-            limbs and branches that arch over the pool"
-    ));
-
-    index_writer.add_document(doc!(
-    title => "Of Mice and Men",
-    body => "A few miles south of Soledad, the Salinas River drops in close to the hillside \
-            bank and runs deep and green. The water is warm too, for it has slipped twinkling \
-            over the yellow sands in the sunlight before reaching the narrow pool. On one \
-            side of the river the golden foothill slopes curve up to the strong and rocky \
-            Gabilan Mountains, but on the valley side the water is lined with trees—willows \
-            fresh and green with every spring, carrying in their lower leaf junctures the \
-            debris of the winter’s flooding; and sycamores with mottled, white, recumbent \
-            limbs and branches that arch over the pool"
-    ));
-
-    // Multivalued field just need to be repeated.
-    index_writer.add_document(doc!(
-    title => "Frankenstein",
-    title => "The Modern Prometheus",
-    body => "You will rejoice to hear that no disaster has accompanied the commencement of an \
-             enterprise which you have regarded with such evil forebodings.  I arrived here \
-             yesterday, and my first task is to assure my dear sister of my welfare and \
-             increasing confidence in the success of my undertaking."
-    ));
+        // For convenience, tantivy also comes with a macro to
+        // reduce the boilerplate above.
+        index_writer.add_document(doc!(
+                url => format!("{}", r_url),
+                title => format!("{}", r_title),
+                body => format!("{}", r_body))
+        );
+    }
 
     // This is an example, so we will only index 3 documents
     // here. You can check out tantivy's tutorial to index
@@ -204,7 +183,7 @@ fn main() -> tantivy::Result<()> {
     // `QueryParser` may fail if the query is not in the right
     // format. For user facing applications, this can be a problem.
     // A ticket has been opened regarding this problem.
-    let query = query_parser.parse_query("sea whale")?;
+    let query = query_parser.parse_query("indiana")?;
 
     // A query defines a set of documents, as
     // well as the way they should be scored.
@@ -224,10 +203,6 @@ fn main() -> tantivy::Result<()> {
 
     // The actual documents still need to be
     // retrieved from Tantivy's store.
-    //
-    // Since the body field was not configured as stored,
-    // the document returned will only contain
-    // a title.
     for (_score, doc_address) in top_docs {
         let retrieved_doc = searcher.doc(doc_address)?;
         println!("{}", schema.to_json(&retrieved_doc));
