@@ -18,6 +18,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{doc, Index, ReloadPolicy};
 use std::fs;
+use std::time::Instant;
 // use tempfile::TempDir;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
@@ -27,6 +28,7 @@ fn main() -> tantivy::Result<()> {
     // sake of this example
     //let index_path = TempDir::new()?;
 
+    // Switching to an actual directory, so rerunning example will duplicate documents
     let index_path = "/tmp/tantivy";
     fs::create_dir_all(index_path)?;
 
@@ -96,28 +98,24 @@ fn main() -> tantivy::Result<()> {
     ];
 
     let file = fs::File::open(&std::path::Path::new(paths[0])).unwrap();
+    // NOTE: couldn't immediately figure out how to flatmap with get_row_iter
+    // so just directly doing one parquet file here
     let reader = SerializedFileReader::new(file).unwrap();
     let mut iter = reader.get_row_iter(None).unwrap();
-    while let Some(row) = iter.next() {
-        let r_url = row.get_string(0).unwrap();
-        let r_title = row.get_string(1).unwrap();
-        let r_body = row.get_string(2).unwrap();
-        // println!("{}", r_url);
 
+    let indexing_time = Instant::now();
+    // FIXME: how could this be parallelized better?
+    while let Some(row) = iter.next() {
         // For convenience, tantivy also comes with a macro to
         // reduce the boilerplate above.
+        // in the example parquet, we know the column order
         index_writer.add_document(doc!(
-                url => format!("{}", r_url),
-                title => format!("{}", r_title),
-                body => format!("{}", r_body))
+                url => format!("{}", row.get_string(0).unwrap()),
+                title => format!("{}", row.get_string(1).unwrap()),
+                body => format!("{}", row.get_string(2).unwrap()))
         );
     }
-
-    // This is an example, so we will only index 3 documents
-    // here. You can check out tantivy's tutorial to index
-    // the English wikipedia. Tantivy's indexing is rather fast.
-    // Indexing 5 million articles of the English wikipedia takes
-    // around 3 minutes on my computer!
+    println!("Elapsed indexing time: {:.2?}", indexing_time.elapsed());
 
     // ### Committing
     //
@@ -176,9 +174,8 @@ fn main() -> tantivy::Result<()> {
 
     // The query parser can interpret human queries.
     // Here, if the user does not specify which
-    // field they want to search, tantivy will search
-    // in both title and body.
-    let query_parser = QueryParser::for_index(&index, vec![title, body]);
+    // field they want to search, tantivy will search all
+    let query_parser = QueryParser::for_index(&index, vec![title, body, url]);
 
     // `QueryParser` may fail if the query is not in the right
     // format. For user facing applications, this can be a problem.
@@ -199,13 +196,18 @@ fn main() -> tantivy::Result<()> {
     // is the role of the `TopDocs` collector.
 
     // We can now perform our query.
+    let searching_time = Instant::now();
     let top_docs = searcher.search(&query, &TopDocs::with_limit(10))?;
+    println!("Elapsed searching time: {:.2?}", searching_time.elapsed());
 
     // The actual documents still need to be
     // retrieved from Tantivy's store.
+    // master branch returns {"title":["The Old Man and the Sea"]}
+    println!("Search results:");
     for (_score, doc_address) in top_docs {
         let retrieved_doc = searcher.doc(doc_address)?;
-        println!("{}", schema.to_json(&retrieved_doc));
+        let doc_string = schema.to_json(&retrieved_doc);
+        println!("{}", doc_string);
     }
 
     Ok(())
